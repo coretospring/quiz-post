@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -182,6 +181,25 @@ canvas#preview {
   min-height:18px;
 }
 .hidden { display:none!important; }
+/* Added: preview scrubber, scene jump buttons, safe-zone toggle */
+.scrub-row {
+  display:grid;
+  grid-template-columns:1fr 64px;
+  gap:10px;
+  align-items:center;
+  margin-top:12px;
+}
+.scrub-row span { font-size:12px; color:#526078; text-align:right; font-variant-numeric:tabular-nums; }
+.scene-buttons button { padding:6px 10px; font-size:12px; }
+.scene-buttons button.active { background:#17233e; color:white; }
+label.check {
+  display:flex;
+  gap:8px;
+  align-items:center;
+  font-weight:normal;
+  font-size:12px;
+  margin-top:10px;
+}
 @media(max-width:900px) {
   main { grid-template-columns:1fr; }
   .preview-panel { order:-1; }
@@ -196,7 +214,7 @@ canvas#preview {
     <strong>Quiz Video Creator</strong><br>
     <small>Custom Quiz Video Creator · Browser Edition</small>
   </div>
-  <small>Vertical video · 9:16 · 1080 × 1920</small>
+  <small>Vertical video · 9:16 · 1080 × 1920 · 30 fps</small>
 </header>
 
 <main>
@@ -209,18 +227,6 @@ canvas#preview {
   <option value="text">Text / Code question</option>
   <option value="image">Image question</option>
 </select>
-
-<div id="textQuestionWrap">
-  <label>Question</label>
-  <div class="editor-mode">
-    <select id="questionMode">
-      <option value="text">Plain text</option>
-      <option value="code">Formatted code</option>
-    </select>
-    <span class="small">Choose text or code</span>
-  </div>
-  <textarea id="question" placeholder="What will this code print?"></textarea>
-</div>
 
 <div id="imageQuestionWrap" class="hidden">
   <label>Upload code / question image</label>
@@ -249,6 +255,18 @@ canvas#preview {
       Remove question image
     </button>
   </div>
+</div>
+
+<div id="textQuestionWrap">
+  <label id="questionLabel">Question</label>
+  <div class="editor-mode">
+    <select id="questionMode">
+      <option value="text">Plain text</option>
+      <option value="code">Formatted code</option>
+    </select>
+    <span class="small">Choose text or code</span>
+  </div>
+  <textarea id="question" placeholder="What will this code print?"></textarea>
 </div>
 
 <label>Answer options</label>
@@ -288,7 +306,7 @@ canvas#preview {
   <div class="grid2">
     <div>
       <label>Total duration (seconds)</label>
-      <input id="duration" type="number" min="8" max="180" value="20">
+      <input id="duration" type="number" min="8" max="180" value="25">
     </div>
     <div>
       <label>Countdown display</label>
@@ -298,7 +316,8 @@ canvas#preview {
       </select>
     </div>
   </div>
-  <p class="note">Video automatically divides the selected duration into intro, question, countdown, answer and CTA scenes.</p>
+  <p class="note">Video automatically divides the selected duration into intro, question, countdown, answer and CTA scenes. 20–30 seconds works well for Reels / Shorts.</p>
+  <p class="note" id="timingInfo"></p>
 </div>
 
 <div class="section">
@@ -409,6 +428,20 @@ canvas#preview {
     <canvas id="preview" width="1080" height="1920"></canvas>
   </div>
 
+  <div class="scrub-row">
+    <input id="scrub" type="range" min="0" max="25" step="0.05" value="0" aria-label="Preview time">
+    <span id="scrubTime">0.0 s</span>
+  </div>
+  <div class="preview-controls scene-buttons">
+    <button type="button" data-scene="hook">Hook</button>
+    <button type="button" data-scene="question">Question</button>
+    <button type="button" data-scene="countdown">Countdown</button>
+    <button type="button" data-scene="reveal">Reveal</button>
+    <button type="button" data-scene="answer">Answer</button>
+    <button type="button" data-scene="cta">CTA</button>
+  </div>
+  <label class="check"><input id="showGuides" type="checkbox"> Show Reels / Shorts safe-zone guides (preview only, never exported)</label>
+
   <div class="preview-controls">
     <button id="downloadVideo" class="primary" type="button">Render & export MP4</button>
     <button id="downloadWebm" type="button">Export WebM</button>
@@ -419,13 +452,15 @@ canvas#preview {
   <div class="status" id="status">Ready. Add a question and options to begin.</div>
 
   <p class="small">
-    MP4 export uses H.264 encoding through FFmpeg.wasm. Internet is required for the first conversion.
-    Use Chrome or Edge over HTTPS or localhost.
+    MP4 export encodes H.264 (1080 × 1920, 30 fps) directly in Chrome / Edge — frame-exact and faster than real time.
+    If the browser can't, it records in real time (keep this tab visible) and, as a last resort, converts with FFmpeg.wasm
+    (internet required). Open this page from <b>http://localhost</b> (see README.md) rather than double-clicking the file.
+    Instagram and TikTok need MP4; WebM is fine for YouTube.
   </p>
 
   <div class="section">
     <h3>Video sequence</h3>
-    <div class="small">01 · Hook → 02 · Question + options → 03 · Countdown → 04 · Correct answer + explanation → 05 · Brand CTA</div>
+    <div class="small">01 · Hook → 02 · Question + options → 03 · Countdown → 04 · Correct answer reveal + explanation → 05 · Brand CTA</div>
   </div>
 </section>
 
@@ -440,18 +475,44 @@ const canvas = $("preview");
 const ctx = canvas.getContext("2d");
 const W = canvas.width;
 const H = canvas.height;
+const FPS = 30;
+
+/* Areas covered by Instagram / YouTube / TikTok UI on a 1080x1920 reel. */
+const SAFE = {top:250,bottom:1570,right:130,rightFrom:1050};
+const SUCCESS = "#22b45a";
 
 let questionImg = null;
 let logoImg = null;
 let bgImg = null;
 let raf = 0;
 let recording = false;
+let currentT = 0;
 let S = {};
 
 const FONT_CODE = 'Consolas, "Courier New", monospace';
 
 function setStatus(message) {
   $("status").textContent = message;
+}
+
+const clamp = (v,min=0,max=1) => Math.max(min,Math.min(max,v));
+const ease = p => 1-Math.pow(1-clamp(p),3);
+function num(id,min,max,fallback) {
+  const v = +$(id).value;
+  return Number.isFinite(v) && $(id).value !== "" ? clamp(v,min,max) : fallback;
+}
+
+/* roundRect fallback for older browsers */
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r) {
+    r = Math.min(typeof r === "number" ? r : 0,w/2,h/2);
+    this.moveTo(x+r,y);
+    this.arcTo(x+w,y,x+w,y+h,r);
+    this.arcTo(x+w,y+h,x,y+h,r);
+    this.arcTo(x,y+h,x,y,r);
+    this.arcTo(x,y,x+w,y,r);
+    this.closePath();
+  };
 }
 
 /* IMAGE HANDLING */
@@ -476,7 +537,7 @@ function loadFile(id,setter) {
   $(id).addEventListener("change",async e => {
     try {
       setter(await imageFromFile(e.target.files[0]));
-      draw(0);
+      redraw();
     } catch(err) {
       setStatus(err.message);
     }
@@ -490,17 +551,17 @@ loadFile("backgroundImage",v => bgImg = v);
 $("removeQuestionImage").onclick = () => {
   questionImg = null;
   $("questionImage").value = "";
-  draw(0);
+  redraw();
 };
 $("removeLogo").onclick = () => {
   logoImg = null;
   $("logo").value = "";
-  draw(0);
+  redraw();
 };
 $("removeBackground").onclick = () => {
   bgImg = null;
   $("backgroundImage").value = "";
-  draw(0);
+  redraw();
 };
 
 /* EDITOR MODES */
@@ -519,7 +580,7 @@ function configureEditor(modeId,textareaId) {
 
   mode.addEventListener("change",() => {
     update();
-    draw(0);
+    redraw();
   });
   update();
 }
@@ -527,16 +588,24 @@ function configureEditor(modeId,textareaId) {
 configureEditor("questionMode","question");
 configureEditor("explanationMode","explanation");
 
-$("questionType").onchange = () => {
+/* In image mode the question text box stays available (needed for "above"/"below" placement). */
+function updateQuestionTypeUI() {
   const isImage = $("questionType").value === "image";
+  const imageOnly = isImage && $("imagePlacement").value === "imageOnly";
   $("imageQuestionWrap").classList.toggle("hidden",!isImage);
-  $("textQuestionWrap").classList.toggle("hidden",isImage);
-  draw(0);
+  $("textQuestionWrap").classList.toggle("hidden",imageOnly);
+  $("questionLabel").textContent = isImage ? "Question text (shown with the image)" : "Question";
+}
+
+$("questionType").onchange = () => {
+  updateQuestionTypeUI();
+  jumpTo("question");
 };
+$("imagePlacement").addEventListener("change",updateQuestionTypeUI);
 
 $("bgOpacity").oninput = () => {
   $("opacityValue").textContent = $("bgOpacity").value + "%";
-  draw(0);
+  redraw();
 };
 
 /* SETTINGS */
@@ -560,20 +629,21 @@ function settings() {
     text:$("textColor").value,
     card:$("cardColor").value,
     font:$("font").value,
-    fontSize:Math.max(24,Math.min(68,+$("fontSize").value || 42)),
+    fontSize:num("fontSize",24,68,42),
     overlay:+$("overlay").value,
     opacity:+$("bgOpacity").value / 100,
     imagePlacement:$("imagePlacement").value,
     imageSize:$("imageSize").value,
-    countdown:Math.max(1,Math.min(15,+$("countdown").value || 5)),
+    countdown:num("countdown",1,15,5),
     countdownStyle:$("countdownStyle").value,
+    duration:num("duration",8,180,25),
 
     hookLabel:$("hookLabel").value,
     hookTitle:$("hookTitle").value,
     hookSubtitle:$("hookSubtitle").value,
-    hookTitleSize:Math.max(30,Math.min(140,+$("hookTitleSize").value || 105)),
-    hookSubtitleSize:Math.max(20,Math.min(90,+$("hookSubtitleSize").value || 60)),
-    hookLabelSize:Math.max(16,Math.min(60,+$("hookLabelSize").value || 35)),
+    hookTitleSize:num("hookTitleSize",30,140,105),
+    hookSubtitleSize:num("hookSubtitleSize",20,90,60),
+    hookLabelSize:num("hookLabelSize",16,60,35),
     hookAlignment:$("hookAlignment").value,
     hookTitleColor:$("hookTitleColor").value,
     hookSubtitleColor:$("hookSubtitleColor").value,
@@ -603,27 +673,46 @@ function fitImage(img,x,y,w,h,mode="contain") {
   ctx.beginPath();
   ctx.rect(x,y,w,h);
   ctx.clip();
+  ctx.imageSmoothingQuality = "high";
   ctx.drawImage(img,x+(w-dw)/2,y+(h-dh)/2,dw,dh);
   ctx.restore();
 }
 
+/* Word wrap that keeps line breaks and splits words that are wider than the box. */
 function wrap(text,maxWidth,font) {
   ctx.font = font;
-  const words = String(text || "").split(/\s+/);
+  const fits = s => ctx.measureText(s).width <= maxWidth;
   const lines = [];
-  let line = "";
 
-  for (const word of words) {
-    const test = line ? line+" "+word : word;
-    if (ctx.measureText(test).width > maxWidth && line) {
-      lines.push(line);
+  for (const para of String(text || "").replace(/\r/g,"").split("\n")) {
+    const words = para.split(/[ \t]+/).filter(Boolean);
+    if (!words.length) { lines.push(""); continue; }
+    let line = "";
+
+    for (let word of words) {
+      const test = line ? line+" "+word : word;
+      if (fits(test)) { line = test; continue; }
+      if (line) lines.push(line);
+      line = "";
+      while (word.length > 1 && !fits(word)) {
+        let k = word.length-1;
+        while (k > 1 && !fits(word.slice(0,k))) k--;
+        lines.push(word.slice(0,k));
+        word = word.slice(k);
+      }
       line = word;
-    } else {
-      line = test;
     }
+    if (line) lines.push(line);
   }
-  if (line) lines.push(line);
+  while (lines.length && !lines[0]) lines.shift();
+  while (lines.length && !lines[lines.length-1]) lines.pop();
   return lines;
+}
+
+function ellipsize(line,maxWidth) {
+  let s = line.replace(/\s+$/,"");
+  while (s && ctx.measureText(s+"…").width > maxWidth) s = s.slice(0,-1);
+  return s+"…";
 }
 
 function drawText(text,x,y,maxWidth,size,color,weight="700",align="center",maxLines=4) {
@@ -632,8 +721,10 @@ function drawText(text,x,y,maxWidth,size,color,weight="700",align="center",maxLi
   ctx.textBaseline = "middle";
 
   const font = `${weight} ${size}px "${S.font}"`;
-  const lines = wrap(text,maxWidth,font).slice(0,maxLines);
+  const all = wrap(text,maxWidth,font);
+  const lines = all.slice(0,maxLines);
   ctx.font = font;
+  if (all.length > maxLines) lines[maxLines-1] = ellipsize(lines[maxLines-1],maxWidth);
 
   lines.forEach((line,i) => {
     ctx.fillText(line,x,y+(i-(lines.length-1)/2)*size*1.25,maxWidth);
@@ -641,72 +732,135 @@ function drawText(text,x,y,maxWidth,size,color,weight="700",align="center",maxLi
   return lines.length;
 }
 
-/* SYNTAX HIGHLIGHTING */
+/* SYNTAX HIGHLIGHTING
+   Tokenizer (not one big regex) so Java generics like List<String> or i<n
+   are no longer painted as HTML tags, and block comments span lines. */
 
-function tokenColor(token) {
-  if (/^(\/\/|\/\*|\*|<!--|#)/.test(token)) return "#83b88e";
-  if (/^["'`]/.test(token)) return "#f5c878";
-  if (/^(<\/?|\/?>)/.test(token)) return "#ff8c9a";
-  if (/^(public|private|protected|static|final|class|new|return|if|else|for|while|const|let|var|function|import|from|true|false|null|void|int|String|boolean|extends|implements|this|throw|try|catch|async|await)$/.test(token)) return "#c49cff";
-  if (/^\d/.test(token)) return "#ffb86c";
-  return "#55d6ff";
+const CODE_COLORS = {
+  plain:"#e5edff", comment:"#83b88e", string:"#f5c878", tag:"#ff8c9a",
+  keyword:"#c49cff", number:"#ffb86c", type:"#7fe0c0", method:"#55d6ff", annotation:"#ffd479"
+};
+const KEYWORDS = new Set((
+  "abstract assert boolean break byte case catch char class const continue default do double else enum " +
+  "extends final finally float for goto if implements import instanceof int interface long native new " +
+  "package private protected public record return sealed permits short static strictfp super switch " +
+  "synchronized this throw throws transient try var void volatile while yield true false null " +
+  "let function async await of in typeof from export def lambda None True False elif pass self"
+).split(" "));
+
+function tokenizeLine(line,state) {
+  const out = [];
+  const push = (text,color) => {
+    if (!text) return;
+    const last = out[out.length-1];
+    if (last && last.color === color) last.text += text;
+    else out.push({text,color});
+  };
+  let i = 0;
+  let m;
+
+  while (i < line.length) {
+    if (state.block) {
+      const end = line.indexOf("*/",i);
+      if (end < 0) { push(line.slice(i),CODE_COLORS.comment); break; }
+      push(line.slice(i,end+2),CODE_COLORS.comment);
+      i = end+2;
+      state.block = false;
+      continue;
+    }
+    const rest = line.slice(i);
+    const prev = line[i-1] || "";
+
+    if (rest.startsWith("//") || (rest[0] === "#" && !line.slice(0,i).trim())) {
+      push(rest,CODE_COLORS.comment);
+      break;
+    }
+    if (rest.startsWith("/*")) {
+      push("/*",CODE_COLORS.comment);
+      i += 2;
+      state.block = true;
+      continue;
+    }
+    if ((m = /^("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|`[^`]*`?)/.exec(rest))) {
+      push(m[0],CODE_COLORS.string); i += m[0].length; continue;
+    }
+    if ((m = /^@[A-Za-z_]\w*/.exec(rest))) {
+      push(m[0],CODE_COLORS.annotation); i += m[0].length; continue;
+    }
+    if ((m = /^<\/?[A-Za-z][\w:-]*/.exec(rest)) && !/[\w$)\]]/.test(prev)) {
+      push(m[0],CODE_COLORS.tag); i += m[0].length; continue;
+    }
+    if ((m = /^\d[\d_]*(?:\.\d+)?[lLfFdD]?/.exec(rest)) && !/[\w$]/.test(prev)) {
+      push(m[0],CODE_COLORS.number); i += m[0].length; continue;
+    }
+    if ((m = /^[A-Za-z_$][\w$]*/.exec(rest))) {
+      const word = m[0];
+      const color = KEYWORDS.has(word) ? CODE_COLORS.keyword
+        : /^[A-Z]/.test(word) ? CODE_COLORS.type
+        : line[i+word.length] === "(" ? CODE_COLORS.method
+        : CODE_COLORS.plain;
+      push(word,color); i += word.length; continue;
+    }
+    push(line[i],CODE_COLORS.plain);
+    i++;
+  }
+  return out;
 }
 
-function drawHighlightedLine(line,x,y,fontSize) {
-  const regex = /(\/\/.*$|\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`|<\/?[a-zA-Z][^>]*>|\b(?:public|private|protected|static|final|class|new|return|if|else|for|while|const|let|var|function|import|from|true|false|null|void|int|String|boolean|extends|implements|this|throw|try|catch|async|await)\b|\b\d+(?:\.\d+)?\b)/g;
-
-  ctx.font = `${fontSize}px ${FONT_CODE}`;
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-
-  let offset = 0;
-  let last = 0;
-  let match;
-
-  while ((match = regex.exec(line)) !== null) {
-    const before = line.slice(last,match.index);
-    ctx.fillStyle = "#e5edff";
-    ctx.fillText(before,x+offset,y);
-    offset += ctx.measureText(before).width;
-
-    const token = match[0];
-    ctx.fillStyle = tokenColor(token);
-    ctx.fillText(token,x+offset,y);
-    offset += ctx.measureText(token).width;
-    last = match.index + token.length;
-  }
-
-  const rest = line.slice(last);
-  ctx.fillStyle = "#e5edff";
-  ctx.fillText(rest,x+offset,y);
+/* Turns code into display rows; lines longer than maxCols wrap onto continuation rows. */
+function layoutCode(rawLines,maxCols) {
+  const state = {block:false};
+  const rows = [];
+  rawLines.forEach((line,index) => {
+    const segs = tokenizeLine(line,state);
+    let row = {num:index+1,segs:[]};
+    let col = 0;
+    for (const seg of segs) {
+      let text = seg.text;
+      while (text.length) {
+        const room = maxCols-col;
+        if (room <= 0) { rows.push(row); row = {num:null,segs:[]}; col = 0; continue; }
+        const piece = text.slice(0,room);
+        row.segs.push({text:piece,color:seg.color});
+        col += piece.length;
+        text = text.slice(piece.length);
+      }
+    }
+    rows.push(row);
+  });
+  return rows;
 }
 
 /* CODE BLOCK */
 
 function drawCodeBlock(text,x,y,width,height,options={}) {
-  if (!text) return y;
+  if (!text || !text.trim()) return y;
 
   const padding = 24;
-  const headerHeight = 42;
-  const gutter = 42;
-  const maxFont = options.fontSize || 27;
-  const minFont = 17;
-  const rawLines = String(text).replace(/\r/g,"").split("\n");
-  const availableHeight = height-padding*2-headerHeight;
-  const maxVisible = Math.max(1,Math.floor(availableHeight/22));
-  const visibleLines = rawLines.slice(0,maxVisible);
+  const headerHeight = 50;
+  const maxFont = options.fontSize || 30;
+  const rawLines = String(text).replace(/\r/g,"").replace(/\t/g,"    ").replace(/\s+$/,"").split("\n");
+  const innerHeight = height-headerHeight-padding*1.5;
+  const digits = String(rawLines.length).length;
 
-  const longest = Math.max(1,...visibleLines.map(line => line.length));
-  let fontSize = maxFont;
-
-  while (fontSize > minFont && longest*fontSize*.61 > width-padding*2-gutter) {
-    fontSize--;
+  let chosen = null;
+  for (let fs = maxFont; fs >= 16; fs--) {
+    ctx.font = `${fs}px ${FONT_CODE}`;
+    const cw = ctx.measureText("M").width;
+    const gutter = Math.ceil(digits*cw*0.75)+22;
+    const maxCols = Math.max(8,Math.floor((width-padding*2-gutter)/cw));
+    const rows = layoutCode(rawLines,maxCols);
+    const lineHeight = Math.round(fs*1.38);
+    const wrapped = rows.length > rawLines.length;
+    chosen = {fs,cw,gutter,rows,lineHeight};
+    // Prefer shrinking over wrapping, but never go below ~21px just to avoid a wrap.
+    if (rows.length*lineHeight <= innerHeight && (!wrapped || fs <= 21)) break;
   }
 
-  let lineHeight = Math.min(37,fontSize*1.35);
-  while (lineHeight > 22 && visibleLines.length*lineHeight > availableHeight) {
-    lineHeight--;
-  }
+  const {fs,cw,gutter,lineHeight} = chosen;
+  const maxRows = Math.max(1,Math.floor(innerHeight/lineHeight));
+  const rows = chosen.rows.slice(0,maxRows);
+  const truncated = chosen.rows.length > rows.length;
 
   rounded(x,y,width,height,22,"#0b1427");
   ctx.save();
@@ -715,33 +869,42 @@ function drawCodeBlock(text,x,y,width,height,options={}) {
   ctx.clip();
 
   ctx.fillStyle = "#152440";
-  ctx.fillRect(x,y,width,headerHeight+12);
-  ctx.font = "700 19px Arial";
+  ctx.fillRect(x,y,width,headerHeight);
+  ctx.font = "700 21px Arial";
   ctx.fillStyle = "#9db2d5";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText(options.title || "CODE",x+padding,y+24);
+  ctx.fillText(options.title || "CODE",x+padding,y+headerHeight/2);
 
   ctx.fillStyle = "#55d6ff";
   ctx.beginPath();
-  ctx.arc(x+width-65,y+24,7,0,Math.PI*2);
+  ctx.arc(x+width-45,y+headerHeight/2,8,0,Math.PI*2);
   ctx.fill();
 
-  visibleLines.forEach((line,index) => {
-    const lineY = y+headerHeight+padding+index*lineHeight;
-    ctx.fillStyle = "#657797";
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
-    ctx.font = `${Math.min(19,fontSize-3)}px ${FONT_CODE}`;
-    ctx.fillText(String(index+1),x+padding+gutter-10,lineY);
-    drawHighlightedLine(line,x+padding+gutter,lineY,fontSize);
+  const top = y+headerHeight+padding*0.75;
+  rows.forEach((row,index) => {
+    const lineY = top+index*lineHeight+lineHeight/2;
+    if (row.num) {
+      ctx.fillStyle = "#657797";
+      ctx.textAlign = "right";
+      ctx.font = `${Math.max(14,fs-4)}px ${FONT_CODE}`;
+      ctx.fillText(String(row.num),x+padding+gutter-16,lineY);
+    }
+    ctx.font = `${fs}px ${FONT_CODE}`;
+    ctx.textAlign = "left";
+    let col = 0;
+    for (const seg of row.segs) {
+      ctx.fillStyle = seg.color;
+      ctx.fillText(seg.text,x+padding+gutter+col*cw,lineY);
+      col += seg.text.length;
+    }
   });
 
-  if (rawLines.length > visibleLines.length) {
+  if (truncated) {
     ctx.fillStyle = "#f5c878";
-    ctx.font = "700 17px Arial";
+    ctx.font = "700 19px Arial";
     ctx.textAlign = "right";
-    ctx.fillText("CODE TRUNCATED",x+width-padding,y+height-17);
+    ctx.fillText("CODE TRUNCATED",x+width-padding,y+height-16);
   }
   ctx.restore();
   return y+height;
@@ -750,23 +913,31 @@ function drawCodeBlock(text,x,y,width,height,options={}) {
 /* TEXT BLOCK */
 
 function drawTextBlock(text,x,y,width,height,options={}) {
-  if (!text) return y;
+  if (!text || !String(text).trim()) return y;
 
   let fontSize = options.fontSize || 42;
   const minFont = options.minFont || 22;
-  const padding = options.padding || 20;
+  const padding = options.padding ?? 20;
   const maxLines = options.maxLines || 8;
+  const weight = options.weight || "700";
+  const font = fs => `${weight} ${fs}px "${S.font}"`;
   let lines = [];
 
-  while (fontSize >= minFont) {
-    lines = wrap(text,width-padding*2,`${options.weight || "700"} ${fontSize}px "${S.font}"`);
-    const lineHeight = fontSize*1.28;
-    if (lines.length <= maxLines && lines.length*lineHeight <= height-padding*2) break;
-    fontSize -= 2;
+  for (;;) {
+    lines = wrap(text,width-padding*2,font(fontSize));
+    const fits = lines.length <= maxLines && lines.length*fontSize*1.28 <= height-padding*2;
+    if (fits || fontSize <= minFont) break;
+    fontSize = Math.max(minFont,fontSize-2);
   }
 
   const lineHeight = fontSize*1.28;
-  const visible = lines.slice(0,maxLines);
+  const fitCount = Math.max(1,Math.min(maxLines,Math.floor((height-padding*2)/lineHeight)));
+  const visible = lines.slice(0,fitCount);
+  ctx.font = font(fontSize);
+  if (lines.length > visible.length) {
+    visible[visible.length-1] = ellipsize(visible[visible.length-1],width-padding*2);
+  }
+
   const totalHeight = visible.length*lineHeight;
   const startY = y+(height-totalHeight)/2+lineHeight/2;
 
@@ -774,7 +945,7 @@ function drawTextBlock(text,x,y,width,height,options={}) {
   ctx.beginPath();
   ctx.rect(x,y,width,height);
   ctx.clip();
-  ctx.font = `${options.weight || "700"} ${fontSize}px "${S.font}"`;
+  ctx.font = font(fontSize);
   ctx.fillStyle = options.color || S.text;
   ctx.textAlign = options.align || "center";
   ctx.textBaseline = "middle";
@@ -813,210 +984,410 @@ function base() {
   ctx.fillStyle = S.accent;
   ctx.fillRect(0,0,W,18);
 
-  if (logoImg) fitImage(logoImg,55,45,145,145,"contain");
+  if (logoImg) fitImage(logoImg,55,60,140,140,"contain");
 
   ctx.fillStyle = S.text;
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
   ctx.font = `700 34px "${S.font}"`;
-  ctx.fillText(S.brand.toUpperCase(),W-55,115,780);
+  ctx.fillText(S.brand.toUpperCase(),W-55,130,logoImg ? 760 : 960);
 
+  // Footer sits just under the content area so app captions cover as little of it as possible.
   ctx.fillStyle = S.accent;
-  ctx.fillRect(80,1750,W-160,4);
+  ctx.fillRect(80,1605,W-160,4);
 
   ctx.fillStyle = S.text;
   ctx.textAlign = "center";
   ctx.font = `600 34px "${S.font}"`;
-  ctx.fillText(S.handle,W/2,1825,900);
+  ctx.fillText(S.handle,W/2,1655,900);
 
   ctx.font = `500 24px "${S.font}"`;
   ctx.fillStyle = "#c7d2e8";
-  ctx.fillText("QUIZ VIDEO",W/2,1880);
+  ctx.fillText("QUIZ VIDEO",W/2,1702);
 }
 
 /* QUESTION */
 
-function drawQuestion() {
-  const x = 90;
-  const width = W-180;
-  const top = 440;
-  const height = 540;
+const Q_AREA = {x:90,top:350,width:W-180,height:520};
 
-  const text = S.type === "image" && S.imagePlacement === "imageOnly" ? "" : S.question;
-  let currentY = top;
+function drawImageCard(x,y,w,h) {
+  rounded(x,y,w,h,22,"#ffffff");
+  fitImage(questionImg,x+14,y+14,w-28,h-28,S.imageSize);
+}
 
-  if (questionImg && S.imagePlacement === "above") {
-    const imageHeight = text ? 250 : 520;
-    rounded(x,currentY,width,imageHeight,22,"#ffffff");
-    fitImage(questionImg,x+14,currentY+14,width-28,imageHeight-28,S.imageSize);
-    currentY += imageHeight+18;
-  }
-
-  if (questionImg && S.imagePlacement === "imageOnly") {
-    rounded(x,currentY,width,520,22,"#ffffff");
-    fitImage(questionImg,x+14,currentY+14,width-28,492,S.imageSize);
-    return;
-  }
-
-  if (text) {
-    const available = Math.max(120,top+height-currentY);
-    if (S.questionMode === "code") {
-      drawRichContent(text,"code",x,currentY,width,Math.min(available,520),{fontSize:26,title:"QUESTION CODE"});
-    } else {
-      drawRichContent(text,"text",x,currentY,width,Math.min(available,520),{
-        fontSize:S.fontSize,minFont:24,maxLines:8,weight:"800"
-      });
-    }
-  }
-
-  if (questionImg && S.imagePlacement === "below") {
-    const imageY = 700;
-    rounded(x,imageY,width,280,22,"#ffffff");
-    fitImage(questionImg,x+14,imageY+14,width-28,252,S.imageSize);
+function drawQuestionText(text,x,y,width,height) {
+  if (S.questionMode === "code") {
+    drawRichContent(text,"code",x,y,width,height,{fontSize:40,title:"QUESTION CODE"});
+  } else {
+    drawRichContent(text,"text",x,y,width,height,{
+      fontSize:S.fontSize,minFont:24,maxLines:8,weight:"800"
+    });
   }
 }
 
-/* ANSWER OPTIONS */
+function drawQuestion() {
+  const {x,top,width,height} = Q_AREA;
+  const useImage = S.type === "image" && questionImg;
+  const text = S.type === "image" && S.imagePlacement === "imageOnly" ? "" : S.question.trim() ? S.question : "";
+  const gap = 18;
 
-function drawOptions() {
-  const startY = 1050;
-  const rowHeight = 135;
-  const gap = 15;
+  if (!useImage) {
+    if (text) drawQuestionText(text,x,top,width,height);
+    return;
+  }
+  if (S.imagePlacement === "imageOnly" || !text) {
+    drawImageCard(x,top,width,height);
+    return;
+  }
+
+  // Image and text share the question area without overlapping.
+  const imageHeight = Math.round(height*0.55);
+  const textHeight = height-imageHeight-gap;
+  if (S.imagePlacement === "below") {
+    drawQuestionText(text,x,top,width,textHeight);
+    drawImageCard(x,top+textHeight+gap,width,imageHeight);
+  } else {
+    drawImageCard(x,top,width,imageHeight);
+    drawQuestionText(text,x,top+imageHeight+gap,width,textHeight);
+  }
+}
+
+/* ANSWER OPTIONS
+   mode "question": rows slide in one after another.
+   mode "reveal":   correct row turns green with a tick, the others fade back. */
+
+function drawOptions(mode="static",local=10) {
+  const startY = 900;
+  const rowHeight = 140;
+  const gap = 20;
+  const x = 80;
+  const width = W-160;
 
   S.opts.forEach((option,i) => {
     const yy = startY+i*(rowHeight+gap);
-    rounded(80,yy,W-160,rowHeight,24,S.card);
+    const isCorrect = "ABCD"[i] === S.correct;
+    const p = mode === "question" ? ease((local-0.25-i*0.12)/0.35)
+      : mode === "reveal" ? ease(local/0.45) : 1;
 
-    ctx.fillStyle = S.accent;
+    ctx.save();
+    if (mode === "question") {
+      ctx.globalAlpha *= p;
+      ctx.translate((1-p)*70,0);
+    } else if (mode === "reveal" && !isCorrect) {
+      ctx.globalAlpha *= 1-0.6*p;
+    }
+
+    rounded(x,yy,width,rowHeight,24,S.card);
+    const highlight = mode === "reveal" && isCorrect;
+    if (highlight) {
+      ctx.save();
+      ctx.globalAlpha *= p;
+      rounded(x,yy,width,rowHeight,24,SUCCESS);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.roundRect(x,yy,width,rowHeight,24);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.fillStyle = highlight ? "#ffffff" : S.accent;
     ctx.beginPath();
-    ctx.arc(160,yy+rowHeight/2,39,0,Math.PI*2);
+    ctx.arc(160,yy+rowHeight/2,40,0,Math.PI*2);
     ctx.fill();
 
-    ctx.fillStyle = "#10203b";
+    ctx.fillStyle = highlight ? SUCCESS : "#10203b";
     ctx.font = `800 40px "${S.font}"`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("ABCD"[i],160,yy+rowHeight/2);
 
-    drawTextBlock(option || `Option ${"ABCD"[i]}`,225,yy+8,W-330,rowHeight-16,{
-      fontSize:37,minFont:24,maxLines:3,align:"left",weight:"700"
+    drawTextBlock(option || `Option ${"ABCD"[i]}`,225,yy+8,highlight ? W-410 : W-330,rowHeight-16,{
+      fontSize:38,minFont:24,maxLines:3,align:"left",weight:"700",
+      color:highlight ? "#ffffff" : S.text
     });
+
+    if (highlight) {
+      // tick mark
+      const cx = W-140;
+      const cy = yy+rowHeight/2;
+      ctx.globalAlpha *= p;
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(cx,cy,34,0,Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = SUCCESS;
+      ctx.lineWidth = 9;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(cx-15,cy+1);
+      ctx.lineTo(cx-4,cy+13);
+      ctx.lineTo(cx+17,cy-12);
+      ctx.stroke();
+    }
+    ctx.restore();
   });
 }
 
 /* ANSWER SCENE */
 
 function drawAnswer() {
-  drawText("CORRECT ANSWER",W/2,470,900,60,S.accent,"900");
-  rounded(100,620,W-200,235,30,S.card);
+  drawText("CORRECT ANSWER",W/2,310,900,60,S.accent,"900");
 
+  const cardY = 385;
+  const cardH = 210;
+  rounded(100,cardY,W-200,cardH,30,S.card);
+  ctx.save();
   ctx.strokeStyle = S.accent;
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.roundRect(100,620,W-200,235,30);
+  ctx.roundRect(100,cardY,W-200,cardH,30);
   ctx.stroke();
+  ctx.restore();
 
   const correctOption = S.opts["ABCD".indexOf(S.correct)] || "Add the correct option";
 
-  drawTextBlock(S.correct+" · "+correctOption,140,650,W-280,175,{
+  drawTextBlock(S.correct+" · "+correctOption,140,cardY+15,W-280,cardH-30,{
     fontSize:52,minFont:28,maxLines:3,weight:"800"
   });
 
   if (S.explanation.trim()) {
-    rounded(80,920,W-160,680,25,"#14233f");
-    drawRichContent(S.explanation,S.explanationMode,105,945,W-210,630,{
-      fontSize:S.explanationMode === "code" ? 26 : 40,
-      minFont:22,maxLines:12,title:"EXPLANATION"
-    });
+    const boxY = 635;
+    const boxH = 900;
+    if (S.explanationMode === "code") {
+      drawCodeBlock(S.explanation,80,boxY,W-160,boxH,{fontSize:30,title:"EXPLANATION"});
+    } else {
+      rounded(80,boxY,W-160,boxH,25,"#14233f");
+      ctx.font = `800 26px "${S.font}"`;
+      ctx.fillStyle = S.accent;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText("EXPLANATION",120,boxY+45);
+      drawTextBlock(S.explanation,105,boxY+75,W-210,boxH-95,{
+        fontSize:42,minFont:24,maxLines:16,weight:"600"
+      });
+    }
   } else {
-    drawText("Did you get it right?",W/2,1200,900,48,"#c7d2e8","700");
+    drawText("Did you get it right?",W/2,900,900,48,"#c7d2e8","700");
   }
 }
 
-/* VIDEO TIMING */
+/* VIDEO TIMING
+   Scenes always add up to exactly the chosen duration. */
 
-function timeline() {
-  const duration = Math.max(8,Math.min(180,+$("duration").value || 20));
-  const intro = Math.min(3,duration*.12);
-  const cd = Math.min(S.countdown,duration*.30);
-  const answer = Math.min(4,duration*.20);
+const SCENE_NAMES = {hook:"Hook",question:"Question",countdown:"Countdown",reveal:"Reveal",answer:"Answer",cta:"CTA"};
+
+function timeline(s=settings()) {
+  const duration = s.duration;
+  const intro = Math.min(2.5,duration*.12);
   const cta = Math.min(3,duration*.15);
-  const questionDuration = Math.max(1,duration-intro-cd-answer-cta);
+  const countdown = Math.min(s.countdown,duration*.30);
+  const rest = duration-intro-cta-countdown;
+  const reveal = Math.min(1.6,rest*.15);
+  const share = s.explanation.trim() ? .6 : .75;
+  const question = (rest-reveal)*share;
+  const answer = rest-reveal-question;
 
-  const questionEnd = intro+questionDuration;
-  const countdownEnd = questionEnd+cd;
-  const answerEnd = countdownEnd+answer;
-
-  return {duration,intro,questionEnd,countdownEnd,answerEnd};
+  let t = 0;
+  const scenes = [["hook",intro],["question",question],["countdown",countdown],
+    ["reveal",reveal],["answer",answer],["cta",cta]].map(([id,len]) => {
+    const scene = {id,start:t,end:t+len};
+    t += len;
+    return scene;
+  });
+  scenes[scenes.length-1].end = duration;
+  return {duration,scenes};
 }
 
-/* INTRO HOOK */
+function sceneAt(T,t) {
+  return T.scenes.find(s => t < s.end) || T.scenes[T.scenes.length-1];
+}
+
+function updateTimingInfo() {
+  const T = timeline();
+  const by = id => T.scenes.find(s => s.id === id);
+  const len = id => by(id).end-by(id).start;
+  $("timingInfo").textContent =
+    `Hook ${len("hook").toFixed(1)}s · Question ${len("question").toFixed(1)}s · Countdown ${len("countdown").toFixed(1)}s · ` +
+    `Answer ${(len("reveal")+len("answer")).toFixed(1)}s · CTA ${len("cta").toFixed(1)}s`;
+  $("scrub").max = T.duration;
+}
+
+/* INTRO HOOK — elements are stacked so a long title can never overlap the subtitle. */
 
 function drawIntroHook() {
   const alignment = S.hookAlignment || "center";
   const textX = alignment === "left" ? 110 : alignment === "right" ? W-110 : W/2;
   const textWidth = W-220;
 
-  drawText(S.hookTitle,textX,700,textWidth,S.hookTitleSize,S.hookTitleColor,"900",alignment,3);
-  drawText(S.hookSubtitle,textX,880,textWidth,S.hookSubtitleSize,S.hookSubtitleColor,"700",alignment,3);
-  drawText(S.hookLabel,textX,1040,textWidth,S.hookLabelSize,S.hookLabelColor,"700",alignment,2);
+  const items = [
+    [S.hookTitle,S.hookTitleSize,S.hookTitleColor,"900",3],
+    [S.hookSubtitle,S.hookSubtitleSize,S.hookSubtitleColor,"700",3],
+    [S.hookLabel,S.hookLabelSize,S.hookLabelColor,"700",2]
+  ].filter(item => item[0] && item[0].trim()).map(([text,size,color,weight,maxLines]) => {
+    // Shrink long hook lines instead of cutting them off.
+    const lineCount = fs => wrap(text,textWidth,`${weight} ${fs}px "${S.font}"`).length;
+    while (size > 30 && lineCount(size) > maxLines) size -= 4;
+    const count = Math.min(maxLines,lineCount(size));
+    return {text,size,color,weight,maxLines,height:count*size*1.25};
+  });
+
+  const gap = 55;
+  const total = items.reduce((sum,item) => sum+item.height,0)+gap*Math.max(0,items.length-1);
+  let y = (SAFE.top+SAFE.bottom)/2-total/2;
+  items.forEach(item => {
+    drawText(item.text,textX,y+item.height/2,textWidth,item.size,item.color,item.weight,alignment,item.maxLines);
+    y += item.height+gap;
+  });
+}
+
+/* COUNTDOWN */
+
+function drawCountdown(local,len) {
+  const remaining = Math.max(0,len-local);
+  const left = Math.max(1,Math.ceil(remaining-1e-6));
+  const frac = len > 0 ? remaining/len : 0;
+  drawText("TIME TO THINK",W/2,520,900,58,S.accent,"800");
+
+  ctx.save();
+  if (S.countdownStyle === "circle") {
+    ctx.lineWidth = 24;
+    ctx.beginPath();
+    ctx.arc(W/2,930,220,0,Math.PI*2);
+    ctx.strokeStyle = "#52627f";
+    ctx.stroke();
+
+    if (frac > 0) {
+      ctx.beginPath();
+      ctx.arc(W/2,930,220,-Math.PI/2,-Math.PI/2+Math.PI*2*frac);
+      ctx.strokeStyle = S.accent;
+      ctx.lineCap = "round";
+      ctx.stroke();
+    }
+    ctx.restore();
+    drawText(String(left),W/2,935,400,180,S.text,"900");
+  } else {
+    // Large numbers: big digit that "pops" each second plus a shrinking bar.
+    const sinceTick = left-remaining; // 0 right when the number changes
+    const pop = 1+0.22*(1-ease(sinceTick/0.35));
+    ctx.translate(W/2,900);
+    ctx.scale(pop,pop);
+    ctx.fillStyle = S.text;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `900 400px "${S.font}"`;
+    ctx.fillText(String(left),0,10);
+    ctx.restore();
+
+    rounded(160,1170,W-320,22,11,"#52627f");
+    if (frac > 0) rounded(160,1170,Math.max(22,(W-320)*frac),22,11,S.accent);
+  }
+
+  drawText("Lock in your answer!",W/2,1300,900,48,S.text,"700");
+}
+
+/* CTA */
+
+function drawCta() {
+  drawText("HOW DID YOU DO?",W/2,690,900,65,S.accent,"900");
+  drawTextBlock(S.cta,100,770,W-200,230,{
+    fontSize:54,minFont:28,maxLines:3,weight:"800"
+  });
+  drawText(S.handle,W/2,1110,900,65,S.accent,"900");
+  drawText("SAVE · SHARE · FOLLOW",W/2,1260,900,36,"#c7d2e8","700");
+}
+
+/* SAFE-ZONE GUIDES (preview only) */
+
+function drawGuides() {
+  ctx.save();
+  ctx.fillStyle = "rgba(255,60,60,.20)";
+  ctx.fillRect(0,0,W,SAFE.top);
+  ctx.fillRect(0,SAFE.bottom,W,H-SAFE.bottom);
+  ctx.fillRect(W-SAFE.right,SAFE.rightFrom,SAFE.right,SAFE.bottom-SAFE.rightFrom);
+  ctx.strokeStyle = "rgba(255,90,90,.9)";
+  ctx.setLineDash([18,12]);
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0,SAFE.top); ctx.lineTo(W,SAFE.top);
+  ctx.moveTo(0,SAFE.bottom); ctx.lineTo(W,SAFE.bottom);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "700 26px Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("May be covered by app UI",W/2,SAFE.top-30);
+  ctx.fillText("Covered by caption / buttons",W/2,SAFE.bottom+30);
+  ctx.restore();
 }
 
 /* MAIN DRAW */
 
-function draw(t=0) {
+function draw(t=0,opts={}) {
   S = settings();
+  const T = timeline(S);
+  t = clamp(t,0,T.duration);
+  currentT = t;
   base();
-  const T = timeline();
 
-  if (t<T.intro) {
+  const scene = sceneAt(T,t);
+  const len = scene.end-scene.start;
+  const local = t-scene.start;
+
+  // Smooth scene transitions: content fades/slides in and fades out; background stays.
+  const fadeIn = scene.id === "hook" ? 1 : ease(local/0.35);
+  const fadeOut = scene.id === "cta" || scene.id === "countdown" ? 1 : ease((len-local)/0.25);
+  ctx.save();
+  ctx.globalAlpha = Math.min(fadeIn,fadeOut);
+  ctx.translate(0,(1-fadeIn)*40);
+
+  if (scene.id === "hook") {
     drawIntroHook();
 
-  } else if (t<T.questionEnd) {
-    drawText("QUESTION",W/2,340,900,48,S.accent,"900");
+  } else if (scene.id === "question" || scene.id === "reveal") {
+    const reveal = scene.id === "reveal";
+    drawText(reveal ? "CORRECT ANSWER" : "QUESTION",W/2,295,900,48,reveal ? SUCCESS : S.accent,"900");
     drawQuestion();
-    drawOptions();
-    drawText("Choose your answer",W/2,1665,900,36,"#c7d2e8","600");
+    drawOptions(reveal ? "reveal" : "question",local);
+    if (!reveal) drawText("Choose your answer",W/2,1552,900,34,"#c7d2e8","600");
 
-  } else if (t<T.countdownEnd) {
-    const left = Math.max(1,Math.ceil(T.countdownEnd-t));
-    drawText("TIME TO THINK",W/2,600,900,55,S.accent,"800");
+  } else if (scene.id === "countdown") {
+    drawCountdown(local,len);
 
-    if (S.countdownStyle === "circle") {
-      ctx.beginPath();
-      ctx.arc(W/2,980,220,0,Math.PI*2);
-      ctx.strokeStyle = "#52627f";
-      ctx.lineWidth = 24;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(W/2,980,220,-Math.PI/2,-Math.PI/2+Math.PI*2*(left/S.countdown));
-      ctx.strokeStyle = S.accent;
-      ctx.lineWidth = 24;
-      ctx.lineCap = "round";
-      ctx.stroke();
-    }
-
-    drawText(String(left),W/2,980,400,180,S.text,"900");
-    drawText("Lock in your answer!",W/2,1280,900,48,S.text,"700");
-
-  } else if (t<T.answerEnd) {
+  } else if (scene.id === "answer") {
     drawAnswer();
 
   } else {
-    drawText("HOW DID YOU DO?",W/2,700,900,65,S.accent,"900");
-    drawText("Follow for more content",W/2,880,900,55,S.text,"800");
-
-    drawTextBlock(S.cta,100,980,W-200,190,{
-      fontSize:44,minFont:26,maxLines:4,weight:"600"
-    });
-
-    drawText(S.handle,W/2,1320,900,65,S.accent,"900");
-    drawText("SAVE · SHARE · FOLLOW",W/2,1500,900,36,"#c7d2e8","700");
+    drawCta();
   }
+  ctx.restore();
+
+  if (opts.guides) drawGuides();
+  return scene;
 }
 
 /* PREVIEW */
+
+function redraw(t=currentT) {
+  const scene = draw(t,{guides:$("showGuides").checked && !recording});
+  if (!recording) {
+    $("scrub").value = currentT;
+    $("scrubTime").textContent = currentT.toFixed(1)+" s";
+    document.querySelectorAll("[data-scene]").forEach(b => b.classList.toggle("active",b.dataset.scene === scene.id));
+  }
+}
+
+function jumpTo(id) {
+  stop();
+  const T = timeline();
+  const scene = T.scenes.find(s => s.id === id);
+  if (!scene) return;
+  // Show the scene once its entrance animation has finished.
+  const t = id === "hook" ? 0 : Math.min(scene.end-0.3,scene.start+Math.max(1.4,(scene.end-scene.start)*0.5));
+  redraw(Math.max(scene.start,t));
+}
 
 function stop() {
   if (raf) cancelAnimationFrame(raf);
@@ -1024,28 +1395,36 @@ function stop() {
 }
 
 function preview() {
+  if (recording) return;
   stop();
-  const start = performance.now();
   const duration = timeline().duration;
+  const from = currentT >= duration-0.05 ? 0 : currentT;
+  const start = performance.now()-from*1000;
 
   function frame(now) {
-    const t = (now-start)/1000;
-    draw(t);
+    const t = Math.max(0,(now-start)/1000);
+    redraw(Math.min(t,duration));
 
     if (t<duration) raf = requestAnimationFrame(frame);
-    else {
-      raf = 0;
-      draw(duration);
-    }
+    else raf = 0;
   }
   raf = requestAnimationFrame(frame);
 }
 
-$("playPreview").onclick = preview;
+$("playPreview").onclick = () => {
+  if (currentT >= timeline().duration-0.05) currentT = 0;
+  preview();
+};
 $("stopPreview").onclick = () => {
   stop();
-  draw(0);
+  redraw(0);
 };
+$("scrub").addEventListener("input",() => {
+  stop();
+  redraw(+$("scrub").value);
+});
+$("showGuides").addEventListener("change",() => redraw());
+document.querySelectorAll("[data-scene]").forEach(b => b.addEventListener("click",() => jumpTo(b.dataset.scene)));
 
 /* CREATE NEXT QUESTION */
 
@@ -1062,15 +1441,20 @@ $("nextQuestion").onclick = () => {
   $("explanationMode").dispatchEvent(new Event("change"));
   $("questionType").dispatchEvent(new Event("change"));
 
-  draw(0);
+  updateTimingInfo();
+  jumpTo("question");
   setStatus("New question ready. Branding and design settings were retained.");
 };
 
 /* LIVE UPDATE */
 
 document.querySelectorAll("input,textarea,select").forEach(el => {
-  if (!["questionImage","logo","backgroundImage"].includes(el.id)) {
-    el.addEventListener("input",() => draw(0));
+  if (!["questionImage","logo","backgroundImage","scrub","showGuides"].includes(el.id)) {
+    el.addEventListener("input",() => {
+      if (recording) return;
+      updateTimingInfo();
+      redraw();
+    });
   }
 });
 
@@ -1081,6 +1465,12 @@ function safeBrandFilename() {
   return brand
     .replace(/[^a-z0-9_-]+/gi,"-")
     .replace(/^-+|-+$/g,"") || "quiz";
+}
+
+function stamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 function downloadBlob(blob,filename) {
@@ -1094,12 +1484,14 @@ function downloadBlob(blob,filename) {
   setTimeout(() => URL.revokeObjectURL(url),60000);
 }
 
-/* PNG EXPORT */
+/* PNG EXPORT — saves the frame currently shown in the preview (without guides). */
 
 $("downloadPng").onclick = () => {
-  draw(0);
+  stop();
+  const scene = draw(currentT);
   canvas.toBlob(blob => {
-    if (blob) downloadBlob(blob,safeBrandFilename()+"-quiz-frame.png");
+    if (blob) downloadBlob(blob,`${safeBrandFilename()}-quiz-${scene.id}-${stamp()}.png`);
+    redraw();
   },"image/png");
 };
 
@@ -1108,12 +1500,12 @@ $("downloadPng").onclick = () => {
 function validate() {
   const s = settings();
 
-  if (!s.question.trim() && !questionImg) {
-    alert("Enter a question or upload a question image.");
-    return false;
-  }
   if (s.type === "image" && !questionImg) {
     alert("Please upload the question image.");
+    return false;
+  }
+  if (s.type === "text" && !s.question.trim()) {
+    alert("Enter a question.");
     return false;
   }
   if (s.opts.some(x => !x.trim())) {
@@ -1129,32 +1521,210 @@ function validate() {
   return true;
 }
 
-/* WEBM RECORDER */
-
-function getWebMMime() {
-  return [
-    "video/webm;codecs=vp9",
-    "video/webm;codecs=vp8",
-    "video/webm"
-  ].find(type => MediaRecorder.isTypeSupported(type));
+function setProgress(fraction,label) {
+  $("progressBar").style.width = Math.min(100,fraction*100).toFixed(1)+"%";
+  if (label) setStatus(label);
 }
 
-async function recordWebM() {
+/* Yield to the browser without setTimeout throttling (keeps working in background tabs). */
+const yieldTask = () => new Promise(resolve => {
+  const ch = new MessageChannel();
+  ch.port1.onmessage = () => resolve();
+  ch.port2.postMessage(0);
+});
+
+/* ---------- 1) FRAME-EXACT MP4 WITH WEBCODECS (Chrome / Edge 94+) ---------- */
+
+async function pickAvcConfig() {
+  if (!window.VideoEncoder || !window.VideoFrame) return [];
+  const configs = [];
+  for (const codec of ["avc1.640028","avc1.4d0028","avc1.42e028","avc1.640032"]) {
+    for (const hardwareAcceleration of ["no-preference","prefer-software"]) {
+      const config = {
+        codec,width:W,height:H,bitrate:12_000_000,framerate:FPS,
+        hardwareAcceleration,latencyMode:"quality",avc:{format:"avc"}
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(config);
+        if (support.supported) configs.push(support.config || config);
+      } catch(e) { /* ignore unsupported config */ }
+    }
+  }
+  return configs;
+}
+
+async function encodeMp4WithConfig(config) {
+  const T = timeline(settings());
+  const total = Math.round(T.duration*FPS);
+  const frameUs = 1e6/FPS;
+  const chunks = [];
+  let avcC = null;
+  let failure = null;
+
+  const encoder = new VideoEncoder({
+    output:(chunk,meta) => {
+      const desc = meta && meta.decoderConfig && meta.decoderConfig.description;
+      if (desc && !avcC) {
+        avcC = ArrayBuffer.isView(desc)
+          ? new Uint8Array(desc.buffer,desc.byteOffset,desc.byteLength).slice()
+          : new Uint8Array(desc).slice();
+      }
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      chunks.push({data,key:chunk.type === "key"});
+    },
+    error:e => { failure = e; }
+  });
+  encoder.configure(config);
+
+  try {
+    for (let i = 0; i < total; i++) {
+      if (failure) throw failure;
+      draw(i/FPS);
+      const frame = new VideoFrame(canvas,{timestamp:Math.round(i*frameUs),duration:Math.round(frameUs)});
+      encoder.encode(frame,{keyFrame:i % (FPS*2) === 0});
+      frame.close();
+
+      while (encoder.encodeQueueSize > 6 && !failure) {
+        await new Promise(resolve => {
+          if ("ondequeue" in encoder) encoder.addEventListener("dequeue",resolve,{once:true});
+          else setTimeout(resolve,4);
+        });
+      }
+      if (i % 6 === 0) {
+        setProgress(i/total,`Encoding MP4: frame ${i+1} / ${total} (${(i/FPS).toFixed(1)} / ${T.duration}s)`);
+        await yieldTask();
+      }
+    }
+    await encoder.flush();
+    if (failure) throw failure;
+  } finally {
+    if (encoder.state !== "closed") encoder.close();
+  }
+
+  if (!avcC) throw new Error("Encoder did not return H.264 decoder configuration.");
+  if (chunks.length !== total) throw new Error(`Encoder returned ${chunks.length} of ${total} frames.`);
+  if (!chunks[0].key) throw new Error("First frame is not a key frame.");
+
+  setStatus("Writing MP4 file...");
+  return muxMp4({width:W,height:H,fps:FPS,chunks,avcC});
+}
+
+async function encodeMp4WebCodecs() {
+  const configs = await pickAvcConfig();
+  if (!configs.length) throw new Error("This browser has no H.264 WebCodecs encoder.");
+  let lastError;
+  for (const config of configs) {
+    try {
+      return await encodeMp4WithConfig(config);
+    } catch(error) {
+      console.warn("WebCodecs config failed",config,error);
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+/* Minimal MP4 (ISO BMFF) writer: one H.264 track, moov before mdat (fast start). */
+function muxMp4({width,height,fps,chunks,avcC}) {
+  const timescale = 90000;
+  const delta = timescale/fps;
+  const count = chunks.length;
+  const mediaDuration = count*delta;
+  const movieDuration = Math.round(count/fps*1000);
+
+  const u8 = n => Uint8Array.of(n & 255);
+  const u16 = n => Uint8Array.of((n>>>8)&255,n&255);
+  const u24 = n => Uint8Array.of((n>>>16)&255,(n>>>8)&255,n&255);
+  const u32 = n => Uint8Array.of((n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255);
+  const str = s => Uint8Array.from(s,c => c.charCodeAt(0));
+  const zeros = n => new Uint8Array(n);
+  const u32s = list => {
+    const out = new Uint8Array(list.length*4);
+    const dv = new DataView(out.buffer);
+    list.forEach((v,i) => dv.setUint32(i*4,v));
+    return out;
+  };
+  const concat = parts => {
+    const out = new Uint8Array(parts.reduce((n,p) => n+p.length,0));
+    let o = 0;
+    for (const p of parts) { out.set(p,o); o += p.length; }
+    return out;
+  };
+  const box = (type,...parts) => {
+    const body = concat(parts);
+    return concat([u32(body.length+8),str(type),body]);
+  };
+  const fullBox = (type,version,flags,...parts) => box(type,u8(version),u24(flags),...parts);
+  const matrix = u32s([0x00010000,0,0,0,0x00010000,0,0,0,0x40000000]);
+
+  const keyIndexes = [];
+  chunks.forEach((c,i) => { if (c.key) keyIndexes.push(i+1); });
+  const sizes = chunks.map(c => c.data.length);
+
+  const ftyp = box("ftyp",str("isom"),u32(512),str("isom"),str("iso2"),str("avc1"),str("mp41"));
+
+  const buildMoov = dataOffset => box("moov",
+    fullBox("mvhd",0,0,u32(0),u32(0),u32(1000),u32(movieDuration),u32(0x00010000),u16(0x0100),
+      zeros(10),matrix,zeros(24),u32(2)),
+    box("trak",
+      fullBox("tkhd",0,3,u32(0),u32(0),u32(1),u32(0),u32(movieDuration),zeros(8),
+        u16(0),u16(0),u16(0),u16(0),matrix,u32(width*65536),u32(height*65536)),
+      box("mdia",
+        fullBox("mdhd",0,0,u32(0),u32(0),u32(timescale),u32(mediaDuration),u16(0x55c4),u16(0)),
+        fullBox("hdlr",0,0,u32(0),str("vide"),zeros(12),str("VideoHandler\0")),
+        box("minf",
+          fullBox("vmhd",0,1,zeros(8)),
+          box("dinf",fullBox("dref",0,0,u32(1),fullBox("url ",0,1))),
+          box("stbl",
+            fullBox("stsd",0,0,u32(1),
+              box("avc1",zeros(6),u16(1),zeros(16),u16(width),u16(height),
+                u32(0x00480000),u32(0x00480000),u32(0),u16(1),zeros(32),u16(0x0018),u16(0xffff),
+                box("avcC",avcC),
+                box("pasp",u32(1),u32(1)))),
+            fullBox("stts",0,0,u32(1),u32(count),u32(delta)),
+            fullBox("stss",0,0,u32(keyIndexes.length),u32s(keyIndexes)),
+            fullBox("stsc",0,0,u32(1),u32(1),u32(count),u32(1)),
+            fullBox("stsz",0,0,u32(0),u32(count),u32s(sizes)),
+            fullBox("stco",0,0,u32(1),u32(dataOffset))
+          )
+        )
+      )
+    )
+  );
+
+  const moovLength = buildMoov(0).length;
+  const dataOffset = ftyp.length+moovLength+8;
+  const moov = buildMoov(dataOffset);
+  const mdatSize = 8+sizes.reduce((a,b) => a+b,0);
+
+  return new Blob([ftyp,moov,u32(mdatSize),str("mdat"),...chunks.map(c => c.data)],{type:"video/mp4"});
+}
+
+/* ---------- 2) REAL-TIME RECORDING WITH MEDIARECORDER (MP4 or WebM) ---------- */
+
+function pickRecorderMime(kind) {
+  if (!window.MediaRecorder) return null;
+  const list = kind === "mp4"
+    ? ["video/mp4;codecs=avc1.640028","video/mp4;codecs=avc1.4d0028","video/mp4;codecs=avc1.42E01E","video/mp4;codecs=avc1","video/mp4"]
+    : ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"];
+  return list.find(type => MediaRecorder.isTypeSupported(type)) || null;
+}
+
+async function recordRealtime(mime) {
   if (!canvas.captureStream || !window.MediaRecorder) {
     throw new Error("Canvas video recording is not supported. Use recent Chrome or Edge.");
   }
 
-  const mime = getWebMMime();
-  if (!mime) throw new Error("This browser does not support WebM recording.");
-
-  const stream = canvas.captureStream(30);
+  const stream = canvas.captureStream(FPS);
   const chunks = [];
+  const warnHidden = () => {
+    if (document.hidden) setStatus("Keep this tab visible while recording — hidden tabs pause the animation.");
+  };
+  document.addEventListener("visibilitychange",warnHidden);
 
   try {
-    const recorder = new MediaRecorder(stream,{
-      mimeType:mime,
-      videoBitsPerSecond:8000000
-    });
+    const recorder = new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:12_000_000});
 
     const stopped = new Promise((resolve,reject) => {
       recorder.ondataavailable = event => {
@@ -1164,27 +1734,22 @@ async function recordWebM() {
       recorder.onerror = event => reject(event.error || new Error("Recording failed."));
     });
 
-    const duration = timeline().duration;
-    const start = performance.now();
+    const duration = timeline(settings()).duration;
 
     draw(0);
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
     recorder.start(250);
+    const start = performance.now();
 
     await new Promise(resolve => {
       function tick(now) {
-        const t = (now-start)/1000;
+        const t = Math.max(0,(now-start)/1000);
         draw(Math.min(t,duration));
-
-        $("progressBar").style.width = Math.min(100,t/duration*100)+"%";
-        setStatus(`Rendering video: ${Math.min(duration,t).toFixed(1)} / ${duration}s`);
+        setProgress(t/duration,`Recording in real time (${mime.split(";")[0]}): ${Math.min(duration,t).toFixed(1)} / ${duration}s — keep this tab visible`);
 
         if (t<duration) requestAnimationFrame(tick);
-        else {
-          // Allow the final canvas frame to be captured before stopping.
-          requestAnimationFrame(() => setTimeout(resolve,200));
-        }
+        else setTimeout(resolve,2000/FPS); // let the final frame be captured
       }
       requestAnimationFrame(tick);
     });
@@ -1192,30 +1757,37 @@ async function recordWebM() {
     recorder.stop();
     await stopped;
 
-    const blob = new Blob(chunks,{type:"video/webm"});
+    const blob = new Blob(chunks,{type:mime.split(";")[0]});
     if (!blob.size) throw new Error("The video recording is empty.");
-
     return blob;
 
   } finally {
+    document.removeEventListener("visibilitychange",warnHidden);
     stream.getTracks().forEach(track => track.stop());
   }
 }
 
-/* FFMPEG MP4 CONVERSION */
+/* ---------- 3) LAST RESORT: FFMPEG.WASM WEBM -> MP4 ---------- */
 
 let ffmpegInstancePromise = null;
+const FFMPEG_ESM = "https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/";
+const FFMPEG_UTIL = "https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js";
+const FFMPEG_CORE = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
 
 async function getFFmpeg() {
   if (!ffmpegInstancePromise) {
     ffmpegInstancePromise = (async () => {
-      const {FFmpeg} = await import(
-        "https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js"
-      );
+      if (location.protocol === "file:") {
+        throw new Error("FFmpeg.wasm cannot load from a file:// page. Open the tool via http://localhost (see README.md).");
+      }
+      const {FFmpeg} = await import(FFMPEG_ESM+"index.js");
+      const {toBlobURL} = await import(FFMPEG_UTIL);
 
-      const {toBlobURL} = await import(
-        "https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js"
-      );
+      // Browsers refuse cross-origin module workers, so make a same-origin (blob) copy
+      // of FFmpeg's worker with its relative imports pointed back at unpkg.
+      const workerSource = await (await fetch(FFMPEG_ESM+"worker.js")).text();
+      const patched = workerSource.replace(/(from\s*["'])\.\/([^"']+)(["'])/g,`$1${FFMPEG_ESM}$2$3`);
+      const classWorkerURL = URL.createObjectURL(new Blob([patched],{type:"text/javascript"}));
 
       const ffmpeg = new FFmpeg();
 
@@ -1223,11 +1795,11 @@ async function getFFmpeg() {
         if (message) setStatus("MP4 conversion: "+message.slice(-110));
       });
 
-      const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
-
+      // The worker is an ES module, so it needs the ESM build of the core.
       await ffmpeg.load({
-        coreURL:await toBlobURL(base+"/ffmpeg-core.js","text/javascript"),
-        wasmURL:await toBlobURL(base+"/ffmpeg-core.wasm","application/wasm")
+        classWorkerURL,
+        coreURL:await toBlobURL(FFMPEG_CORE+"/ffmpeg-core.js","text/javascript"),
+        wasmURL:await toBlobURL(FFMPEG_CORE+"/ffmpeg-core.wasm","application/wasm")
       });
 
       return ffmpeg;
@@ -1241,11 +1813,9 @@ async function getFFmpeg() {
 }
 
 async function convertToMp4(webmBlob) {
-  setStatus("Loading H.264 MP4 converter...");
+  setStatus("Loading H.264 MP4 converter (FFmpeg.wasm, ~30 MB download the first time)...");
   const ffmpeg = await getFFmpeg();
-  const {fetchFile} = await import(
-    "https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js"
-  );
+  const {fetchFile} = await import(FFMPEG_UTIL);
 
   await ffmpeg.writeFile("input.webm",await fetchFile(webmBlob));
 
@@ -1255,8 +1825,8 @@ async function convertToMp4(webmBlob) {
     "-i","input.webm",
     "-an",
     "-c:v","libx264",
-    "-preset","ultrafast",
-    "-crf","23",
+    "-preset","veryfast",
+    "-crf","20",
     "-pix_fmt","yuv420p",
     "-r","30",
     "-movflags","+faststart",
@@ -1287,30 +1857,58 @@ async function convertToMp4(webmBlob) {
 
 /* EXPORT CONTROLS */
 
+async function makeMp4() {
+  try {
+    const blob = await encodeMp4WebCodecs();
+    return {blob,method:"WebCodecs H.264"};
+  } catch(error) {
+    console.warn("WebCodecs MP4 export unavailable:",error);
+  }
+
+  const mp4Mime = pickRecorderMime("mp4");
+  if (mp4Mime) {
+    return {blob:await recordRealtime(mp4Mime),method:"MediaRecorder MP4 (real time)"};
+  }
+
+  const webmMime = pickRecorderMime("webm");
+  if (!webmMime) throw new Error("This browser cannot record video. Use recent Chrome or Edge.");
+  const webm = await recordRealtime(webmMime);
+  try {
+    return {blob:await convertToMp4(webm),method:"FFmpeg.wasm"};
+  } catch(error) {
+    downloadBlob(webm,`${safeBrandFilename()}-quiz-${stamp()}.webm`);
+    throw new Error(error.message+"\n\nThe WebM version was downloaded instead.");
+  }
+}
+
 async function exportVideo(wantMp4) {
   if (recording || !validate()) return;
 
-  recording = true;
   stop();
+  recording = true;
+  const shownT = currentT;
 
   $("downloadVideo").disabled = true;
   $("downloadWebm").disabled = true;
   $("downloadPng").disabled = true;
+  setProgress(0);
 
   try {
-    let blob = await recordWebM();
-    let extension = "webm";
-
+    let result;
     if (wantMp4) {
-      blob = await convertToMp4(blob);
-      extension = "mp4";
+      result = await makeMp4();
+    } else {
+      const mime = pickRecorderMime("webm");
+      if (!mime) throw new Error("This browser does not support WebM recording.");
+      result = {blob:await recordRealtime(mime),method:"MediaRecorder WebM (real time)"};
     }
+    const extension = wantMp4 ? "mp4" : "webm";
 
-    downloadBlob(blob,safeBrandFilename()+"-quiz."+extension);
+    downloadBlob(result.blob,`${safeBrandFilename()}-quiz-${stamp()}.${extension}`);
 
-    $("progressBar").style.width = "100%";
+    setProgress(1);
     setStatus(
-      `${extension.toUpperCase()} exported successfully. File size: ${(blob.size/1024/1024).toFixed(2)} MB.`
+      `${extension.toUpperCase()} exported successfully via ${result.method}. File size: ${(result.blob.size/1024/1024).toFixed(2)} MB.`
     );
 
   } catch(error) {
@@ -1318,7 +1916,7 @@ async function exportVideo(wantMp4) {
     setStatus("Export failed: "+error.message);
     alert(
       "Video export failed:\n\n"+error.message+
-      "\n\nFor MP4 conversion, use Chrome or Edge over HTTPS or localhost."
+      "\n\nUse the latest Chrome or Edge and open this page via http://localhost (see README.md)."
     );
 
   } finally {
@@ -1326,16 +1924,24 @@ async function exportVideo(wantMp4) {
     $("downloadVideo").disabled = false;
     $("downloadWebm").disabled = false;
     $("downloadPng").disabled = false;
-    draw(0);
+    redraw(shownT);
   }
 }
 
 $("downloadVideo").onclick = () => exportVideo(true);
 $("downloadWebm").onclick = () => exportVideo(false);
 
+/* Hooks for automated testing (harmless in normal use). */
+window.QuizVideo = {draw,timeline,encodeMp4WebCodecs,recordRealtime,pickRecorderMime,convertToMp4,muxMp4};
+
 /* INITIALIZATION */
 
-draw(0);
+updateQuestionTypeUI();
+updateTimingInfo();
+redraw(0);
+if (!window.isSecureContext || !window.VideoEncoder) {
+  setStatus("Tip: open this page via http://localhost (run serve.ps1, see README.md) for the fastest, frame-exact MP4 export.");
+}
 
 })();
 </script>
